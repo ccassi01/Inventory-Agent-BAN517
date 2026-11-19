@@ -351,8 +351,8 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
     sales_class = cum_sales_pct.map(_assign_cumulative_class)
     sales_score = sales_class.map(score_map)
 
-    work_df["Cumulative Sales ($)"] = cum_sales.reindex(work_df.index)
-    work_df["Cumulative Sales Percentage"] = cum_sales_pct.reindex(work_df.index)
+    work_df["Cumulative Sales"] = cum_sales.reindex(work_df.index)
+    work_df["Cumulative Sales %"] = cum_sales_pct.reindex(work_df.index)
     work_df["Sales Class"] = sales_class.reindex(work_df.index)
     work_df["Sales Score"] = sales_score.reindex(work_df.index)
 
@@ -364,7 +364,7 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
     hits_score = hits_class.map(score_map)
 
     work_df["Cumulative POS Hits"] = cum_hits.reindex(work_df.index)
-    work_df["Cumulative Hits Percentage"] = cum_hits_pct.reindex(work_df.index)
+    work_df["Cumulative Hits %"] = cum_hits_pct.reindex(work_df.index)
     work_df["Hits Class"] = hits_class.reindex(work_df.index)
     work_df["Hits Score"] = hits_score.reindex(work_df.index)
 
@@ -479,7 +479,7 @@ def _render_multicriteria_classification_view(st: Any, classification: dict[str,
     except Exception:
         st.bar_chart(summary_df.set_index("Final Class")["Item Count"])
 
-    st.subheader("Summary by Final Class (Total Sales & Item Counts)")
+    st.subheader("Summary by Final Class")
     st.dataframe(
         summary_df,
         use_container_width=True,
@@ -501,12 +501,12 @@ def _render_multicriteria_classification_view(st: Any, classification: dict[str,
         col_map["uom"],
         sales_col,
         hits_col,
-        "Cumulative Sales ($)",
-        "Cumulative Sales Percentage",
+        "Cumulative Sales",
+        "Cumulative Sales %",
         "Sales Class",
         "Sales Score",
         "Cumulative POS Hits",
-        "Cumulative Hits Percentage",
+        "Cumulative Hits %",
         "Hits Class",
         "Hits Score",
         "Combined Weighted Score",
@@ -523,10 +523,10 @@ def _render_multicriteria_classification_view(st: Any, classification: dict[str,
         column_config={
             sales_col: st.column_config.NumberColumn(sales_col, format="$%.2f"),
             hits_col: st.column_config.NumberColumn(hits_col),
-            "Cumulative Sales ($)": st.column_config.NumberColumn("Cumulative Sales ($)", format="$%.2f"),
-            "Cumulative Sales Percentage": st.column_config.NumberColumn("Cumulative Sales Percentage", format="%.2f%%"),
+            "Cumulative Sales": st.column_config.NumberColumn("Cumulative Sales", format="$%.2f"),
+            "Cumulative Sales %": st.column_config.NumberColumn("Cumulative Sales %", format="%.2f%%"),
             "Cumulative POS Hits": st.column_config.NumberColumn("Cumulative POS Hits"),
-            "Cumulative Hits Percentage": st.column_config.NumberColumn("Cumulative Hits Percentage", format="%.2f%%"),
+            "Cumulative Hits %": st.column_config.NumberColumn("Cumulative Hits %", format="%.2f%%"),
             "Combined Weighted Score": st.column_config.NumberColumn("Combined Weighted Score", format="%.2f"),
         },
     )
