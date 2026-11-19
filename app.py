@@ -3,7 +3,7 @@
 Supports two execution modes:
     1. Web UI (Streamlit):
            streamlit run app.py
-    2. Interactive CLI / Single-Query / Demo mode:
+    2. Command Prompt / Terminal CLI:
            python app.py
            python app.py --demo
            python app.py "Annual demand is 10,000 units, ordering cost is $50, holding cost is $4/unit/year. What is the EOQ?"
@@ -18,13 +18,13 @@ from typing import Any
 from inventory_agent import AgentResponse, InventoryDecisionAgent
 
 REQUIRED_CSV_COLUMNS: list[str] = ["Product", "Category", "Units", "Unit Cost"]
-REQUIRED_CLASSIFICATION_COLUMNS: list[str] = [
-    "Item Number",
-    "Item Name",
-    "UoM",
-    "Sales ($)",
-    "Hits",
-]
+CLASSIFICATION_COLUMN_ALIASES: dict[str, list[str]] = {
+    "item_number": ["Item Number"],
+    "item_name": ["Item Name"],
+    "uom": ["Unit of Measure (UoM)", "UoM", "Unit of Measure"],
+    "sales": ["Sales ($)"],
+    "hits": ["POS Hits", "Hits"],
+}
 
 SAMPLE_QUESTIONS: dict[str, str] = {
     "1. Economic Order Quantity (EOQ)": (
@@ -86,7 +86,7 @@ def _render_streamlit_app() -> None:
         use_llm = st.toggle(
             "Enable LLM-Assisted Input Extraction",
             value=False,
-            help="Uses OpenAI (requires OPENAI_API_KEY) for NLP extraction only. All calculations always run in Python.",
+            help="Uses OpenAI (requires OPENAI_API_KEY) for NLP extraction only. All calculations run in Python.",
         )
         st.divider()
         st.subheader("Sample Questions")
@@ -132,11 +132,7 @@ def _render_streamlit_app() -> None:
 
 
 def analyze_inventory_dataframe(df: Any) -> dict[str, Any]:
-    """Validate an uploaded inventory DataFrame and compute summary analytics with pandas.
-
-    Uses only the uploaded DataFrame as the source for all calculations and never
-    hardcodes dataset values or invents missing numerical data.
-    """
+    """Validate an uploaded inventory DataFrame and compute summary analytics with pandas."""
     import pandas as pd
 
     missing_columns = [col for col in REQUIRED_CSV_COLUMNS if col not in df.columns]
@@ -164,8 +160,6 @@ def analyze_inventory_dataframe(df: Any) -> dict[str, Any]:
         }
 
     analyzed_df = df.copy()
-
-    # Convert Units and Unit Cost to numeric using pandas (supporting currency/comma formatting if present)
     for col in ("Units", "Unit Cost"):
         if not pd.api.types.is_numeric_dtype(analyzed_df[col]):
             cleaned = (
@@ -223,7 +217,7 @@ def analyze_inventory_dataframe(df: Any) -> dict[str, Any]:
 
 
 def _assign_cumulative_class(cum_pct: float) -> str:
-    """Assign BAN 517 A/B/C/D class from cumulative percentage (0-60, 61-80, 81-90, 91-100)."""
+    """Assign A/B/C/D class from cumulative percentage (0-60 A, 61-80 B, 81-90 C, 91-100 D)."""
     eps = 1e-9
     if cum_pct <= 60.0 + eps:
         return "A"
@@ -246,19 +240,33 @@ def _assign_final_class(weighted_score: float) -> str:
     return "D"
 
 
+def _resolve_classification_columns(df: Any) -> tuple[dict[str, str], list[str]]:
+    """Map canonical classification fields to actual DataFrame columns (supporting UoM/POS Hits variants)."""
+    col_lookup = {str(c).strip(): str(c) for c in df.columns}
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for key, candidates in CLASSIFICATION_COLUMN_ALIASES.items():
+        found = next((col_lookup[c] for c in candidates if c in col_lookup), None)
+        if found is not None:
+            resolved[key] = found
+        else:
+            missing.append(" or ".join(candidates))
+    return resolved, missing
+
+
 def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
-    """Perform BAN 517 Multicriteria Inventory Classification (A, B, C, D) using Sales ($) and Hits.
+    """Perform BAN 517 multicriteria inventory classification (A, B, C, D) using Sales ($) and POS Hits in pandas.
 
     Methodology:
-        Step 1: Sort descending by Sales ($) -> Cumulative Sales % -> Sales Class (A=0-60%, B=61-80%,
-                C=81-90%, D=91-100%) -> Sales Score (A=4, B=3, C=2, D=1).
-                Separately sort descending by Hits -> Cumulative Hits % -> Hits Class -> Hits Score.
+        Step 1: Independently sort descending by Sales ($) and by POS Hits; compute cumulative values and
+                Cumulative Sales Percentage / Cumulative Hits Percentage; assign A (0-60%), B (61-80%),
+                C (81-90%), D (91-100%) and convert to scores (A=4, B=3, C=2, D=1).
         Step 2: Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score.
         Step 3: Final Class: A (3.25-4.00), B (2.50-3.24), C (1.75-2.49), D (<1.75).
     """
     import pandas as pd
 
-    missing_columns = [col for col in REQUIRED_CLASSIFICATION_COLUMNS if col not in df.columns]
+    col_map, missing_columns = _resolve_classification_columns(df)
     if missing_columns:
         return {
             "valid": False,
@@ -282,10 +290,14 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
             "column_names": list(df.columns),
         }
 
-    work_df = df.copy()
+    item_num_col = col_map["item_number"]
+    item_name_col = col_map["item_name"]
+    uom_col = col_map["uom"]
+    sales_col = col_map["sales"]
+    hits_col = col_map["hits"]
 
-    # Clean and validate numeric columns: Sales ($) and Hits
-    for col in ("Sales ($)", "Hits"):
+    work_df = df.copy()
+    for col in (sales_col, hits_col):
         if not pd.api.types.is_numeric_dtype(work_df[col]):
             cleaned = (
                 work_df[col]
@@ -302,20 +314,20 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
                 "missing_columns": [],
                 "error": (
                     f"Column '{col}' contains {bad_rows} non-numeric or missing value(s). "
-                    "Please ensure all 'Sales ($)' and 'Hits' entries are valid numbers."
+                    f"Please ensure all '{sales_col}' and '{hits_col}' entries are valid numbers."
                 ),
                 "num_rows": int(df.shape[0]),
                 "num_columns": int(df.shape[1]),
                 "column_names": list(df.columns),
             }
 
-    total_sales = float(work_df["Sales ($)"].sum())
-    total_hits = float(work_df["Hits"].sum())
+    total_sales = float(work_df[sales_col].sum())
+    total_hits = float(work_df[hits_col].sum())
     if total_sales <= 0.0:
         return {
             "valid": False,
             "missing_columns": [],
-            "error": "Total 'Sales ($)' must be strictly greater than 0 to compute cumulative sales percentages.",
+            "error": f"Total '{sales_col}' must be strictly greater than 0.",
             "num_rows": int(df.shape[0]),
             "num_columns": int(df.shape[1]),
             "column_names": list(df.columns),
@@ -324,7 +336,7 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
         return {
             "valid": False,
             "missing_columns": [],
-            "error": "Total 'Hits' must be strictly greater than 0 to compute cumulative hits percentages.",
+            "error": f"Total '{hits_col}' must be strictly greater than 0.",
             "num_rows": int(df.shape[0]),
             "num_columns": int(df.shape[1]),
             "column_names": list(df.columns),
@@ -332,52 +344,51 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
 
     score_map = {"A": 4, "B": 3, "C": 2, "D": 1}
 
-    # STEP 1A: Sort descending by Sales ($), compute Cumulative Sales % and Sales Class/Score
-    sales_sorted = work_df.sort_values(by="Sales ($)", ascending=False, kind="mergesort")
-    cum_sales = sales_sorted["Sales ($)"].cumsum()
+    # Step 1A: Independently sort descending by Sales ($), compute cumulative Sales & percentage
+    sales_sorted = work_df.sort_values(by=sales_col, ascending=False, kind="mergesort")
+    cum_sales = sales_sorted[sales_col].cumsum()
     cum_sales_pct = (cum_sales / total_sales) * 100.0
     sales_class = cum_sales_pct.map(_assign_cumulative_class)
     sales_score = sales_class.map(score_map)
 
-    work_df["Cumulative Sales %"] = cum_sales_pct.reindex(work_df.index)
+    work_df["Cumulative Sales ($)"] = cum_sales.reindex(work_df.index)
+    work_df["Cumulative Sales Percentage"] = cum_sales_pct.reindex(work_df.index)
     work_df["Sales Class"] = sales_class.reindex(work_df.index)
     work_df["Sales Score"] = sales_score.reindex(work_df.index)
 
-    # STEP 1B: Separately sort descending by Hits, compute Cumulative Hits % and Hits Class/Score
-    hits_sorted = work_df.sort_values(by="Hits", ascending=False, kind="mergesort")
-    cum_hits = hits_sorted["Hits"].cumsum()
+    # Step 1B: Independently sort descending by POS Hits, compute cumulative Hits & percentage
+    hits_sorted = work_df.sort_values(by=hits_col, ascending=False, kind="mergesort")
+    cum_hits = hits_sorted[hits_col].cumsum()
     cum_hits_pct = (cum_hits / total_hits) * 100.0
     hits_class = cum_hits_pct.map(_assign_cumulative_class)
     hits_score = hits_class.map(score_map)
 
-    work_df["Cumulative Hits %"] = cum_hits_pct.reindex(work_df.index)
+    work_df["Cumulative POS Hits"] = cum_hits.reindex(work_df.index)
+    work_df["Cumulative Hits Percentage"] = cum_hits_pct.reindex(work_df.index)
     work_df["Hits Class"] = hits_class.reindex(work_df.index)
     work_df["Hits Score"] = hits_score.reindex(work_df.index)
 
-    # STEP 2: Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score
+    # Step 2: Combined Weighted Score = 0.65 * Sales Score + 0.35 * Hits Score
     work_df["Combined Weighted Score"] = (
         0.65 * work_df["Sales Score"] + 0.35 * work_df["Hits Score"]
     ).round(2)
 
-    # STEP 3: Assign Final Inventory Class
+    # Step 3: Assign Final Class
     work_df["Final Class"] = work_df["Combined Weighted Score"].map(_assign_final_class)
 
-    # Sort final table cleanly by Combined Weighted Score (desc) then Sales ($) (desc)
     classified_df = work_df.sort_values(
-        by=["Combined Weighted Score", "Sales ($)", "Hits"],
+        by=["Combined Weighted Score", sales_col, hits_col],
         ascending=[False, False, False],
         kind="mergesort",
     ).reset_index(drop=True)
 
-    # Build ordered A, B, C, D summary table
-    class_order = ["A", "B", "C", "D"]
     summary_rows: list[dict[str, Any]] = []
     total_items = int(classified_df.shape[0])
-    for cls in class_order:
+    for cls in ["A", "B", "C", "D"]:
         subset = classified_df[classified_df["Final Class"] == cls]
         count = int(subset.shape[0])
-        cls_sales = float(subset["Sales ($)"].sum())
-        cls_hits = float(subset["Hits"].sum())
+        cls_sales = float(subset[sales_col].sum())
+        cls_hits = float(subset[hits_col].sum())
         summary_rows.append(
             {
                 "Final Class": cls,
@@ -385,8 +396,8 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
                 "% of Items": (count / total_items) * 100.0 if total_items > 0 else 0.0,
                 "Total Sales ($)": cls_sales,
                 "% of Sales": (cls_sales / total_sales) * 100.0,
-                "Total Hits": cls_hits,
-                "% of Hits": (cls_hits / total_hits) * 100.0,
+                "Total POS Hits": cls_hits,
+                "% of POS Hits": (cls_hits / total_hits) * 100.0,
             }
         )
     class_summary_df = pd.DataFrame(summary_rows)
@@ -395,6 +406,13 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
         "valid": True,
         "missing_columns": [],
         "error": None,
+        "column_map": {
+            "item_number": item_num_col,
+            "item_name": item_name_col,
+            "uom": uom_col,
+            "sales": sales_col,
+            "hits": hits_col,
+        },
         "num_rows": int(df.shape[0]),
         "num_columns": int(df.shape[1]),
         "column_names": list(df.columns),
@@ -405,24 +423,26 @@ def classify_inventory_multicriteria(df: Any) -> dict[str, Any]:
     }
 
 
-def _render_multicriteria_classification_view(st: Any, df: Any, classification: dict[str, Any]) -> None:
+def _render_multicriteria_classification_view(st: Any, classification: dict[str, Any]) -> None:
     """Render BAN 517 Multicriteria Inventory Classification results in Streamlit."""
+    col_map = classification["column_map"]
+    sales_col = col_map["sales"]
+    hits_col = col_map["hits"]
+
     st.header("Multicriteria Inventory Classification (BAN 517: Sales & POS Hits)")
     st.caption(
-        "Methodology: Separate A/B/C/D tiers for **Sales ($)** and **Hits** "
+        "Step 1: Separate A/B/C/D tiers for **Sales ($)** and **POS Hits** "
         "(0–60% A=4, 61–80% B=3, 81–90% C=2, 91–100% D=1) → "
-        "**Combined Weighted Score = 0.65 × Sales Score + 0.35 × Hits Score** → "
-        "**Final Class** (A: 3.25–4.00, B: 2.50–3.24, C: 1.75–2.49, D: <1.75)."
+        "Step 2: **Combined Weighted Score = 0.65 × Sales Score + 0.35 × Hits Score** → "
+        "Step 3: **Final Class** (A: 3.25–4.00, B: 2.50–3.24, C: 1.75–2.49, D: <1.75)."
     )
 
-    # Dataset metadata
-    meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
-    meta_col1.metric("Number of Items", f"{classification['num_rows']:,}")
-    meta_col2.metric("Number of Columns", f"{classification['num_columns']:,}")
-    meta_col3.metric("Total Sales ($)", f"${classification['total_sales']:,.2f}")
-    meta_col4.metric("Total POS Hits", f"{classification['total_hits']:,.0f}")
+    meta1, meta2, meta3, meta4 = st.columns(4)
+    meta1.metric("Number of Items", f"{classification['num_rows']:,}")
+    meta2.metric("Number of Columns", f"{classification['num_columns']:,}")
+    meta3.metric("Total Sales ($)", f"${classification['total_sales']:,.2f}")
+    meta4.metric("Total POS Hits", f"{classification['total_hits']:,.0f}")
 
-    # Class count KPI row
     summary_df = classification["class_summary_df"]
     c_cols = st.columns(4)
     for col_ui, cls in zip(c_cols, ["A", "B", "C", "D"]):
@@ -430,12 +450,11 @@ def _render_multicriteria_classification_view(st: Any, df: Any, classification: 
         col_ui.metric(
             f"Class {cls} Items",
             f"{int(row['Item Count']):,}",
-            delta=f"{row['% of Items']:.1f}% of items | {row['% of Sales']:.1f}% of sales",
+            delta=f"${row['Total Sales ($)']:,.2f} ({row['% of Sales']:.1f}% of sales)",
             delta_color="off",
         )
 
-    # Bar chart of count of items by Final Class (strict A, B, C, D order)
-    st.subheader("Item Count by Final Class")
+    st.subheader("Count of Items by Final Class")
     try:
         import altair as alt
 
@@ -451,7 +470,7 @@ def _render_multicriteria_classification_view(st: Any, df: Any, classification: 
                     "Item Count",
                     alt.Tooltip("% of Items:Q", format=".1f"),
                     alt.Tooltip("Total Sales ($):Q", format="$,.2f"),
-                    alt.Tooltip("Total Hits:Q", format=",.0f"),
+                    alt.Tooltip("Total POS Hits:Q", format=",.0f"),
                 ],
             )
             .properties(height=320)
@@ -460,8 +479,7 @@ def _render_multicriteria_classification_view(st: Any, df: Any, classification: 
     except Exception:
         st.bar_chart(summary_df.set_index("Final Class")["Item Count"])
 
-    # Summary table by Final Class
-    st.subheader("Summary by Final Class")
+    st.subheader("Summary by Final Class (Total Sales & Item Counts)")
     st.dataframe(
         summary_df,
         use_container_width=True,
@@ -471,23 +489,24 @@ def _render_multicriteria_classification_view(st: Any, df: Any, classification: 
             "% of Items": st.column_config.NumberColumn("% of Items", format="%.2f%%"),
             "Total Sales ($)": st.column_config.NumberColumn("Total Sales ($)", format="$%.2f"),
             "% of Sales": st.column_config.NumberColumn("% of Sales", format="%.2f%%"),
-            "Total Hits": st.column_config.NumberColumn("Total Hits"),
-            "% of Hits": st.column_config.NumberColumn("% of Hits", format="%.2f%%"),
+            "Total POS Hits": st.column_config.NumberColumn("Total POS Hits"),
+            "% of POS Hits": st.column_config.NumberColumn("% of POS Hits", format="%.2f%%"),
         },
     )
 
-    # Full classification table
-    st.subheader("Full Multicriteria Inventory Classification Table")
+    st.subheader("Complete Multicriteria Inventory Classification Table")
     display_cols = [
-        "Item Number",
-        "Item Name",
-        "UoM",
-        "Sales ($)",
-        "Hits",
-        "Cumulative Sales %",
+        col_map["item_number"],
+        col_map["item_name"],
+        col_map["uom"],
+        sales_col,
+        hits_col,
+        "Cumulative Sales ($)",
+        "Cumulative Sales Percentage",
         "Sales Class",
         "Sales Score",
-        "Cumulative Hits %",
+        "Cumulative POS Hits",
+        "Cumulative Hits Percentage",
         "Hits Class",
         "Hits Score",
         "Combined Weighted Score",
@@ -502,27 +521,26 @@ def _render_multicriteria_classification_view(st: Any, df: Any, classification: 
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Sales ($)": st.column_config.NumberColumn("Sales ($)", format="$%.2f"),
-            "Hits": st.column_config.NumberColumn("Hits"),
-            "Cumulative Sales %": st.column_config.NumberColumn("Cumulative Sales %", format="%.2f%%"),
-            "Cumulative Hits %": st.column_config.NumberColumn("Cumulative Hits %", format="%.2f%%"),
+            sales_col: st.column_config.NumberColumn(sales_col, format="$%.2f"),
+            hits_col: st.column_config.NumberColumn(hits_col),
+            "Cumulative Sales ($)": st.column_config.NumberColumn("Cumulative Sales ($)", format="$%.2f"),
+            "Cumulative Sales Percentage": st.column_config.NumberColumn("Cumulative Sales Percentage", format="%.2f%%"),
+            "Cumulative POS Hits": st.column_config.NumberColumn("Cumulative POS Hits"),
+            "Cumulative Hits Percentage": st.column_config.NumberColumn("Cumulative Hits Percentage", format="%.2f%%"),
             "Combined Weighted Score": st.column_config.NumberColumn("Combined Weighted Score", format="%.2f"),
         },
     )
 
-    csv_bytes = ordered_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="Download Classified Inventory CSV",
-        data=csv_bytes,
+        data=ordered_df.to_csv(index=False).encode("utf-8"),
         file_name="inventory_multicriteria_classification.csv",
         mime="text/csv",
     )
 
 
 def _render_csv_analysis_section(st: Any, uploaded_file: Any) -> None:
-    """Read an uploaded CSV into pandas and route to Inventory Value Analysis and/or
-    BAN 517 Multicriteria Inventory Classification using the single uploaded DataFrame.
-    """
+    """Read the uploaded CSV once into pandas and run Inventory Classification and/or Inventory Value Analysis."""
     import pandas as pd
 
     try:
@@ -532,15 +550,15 @@ def _render_csv_analysis_section(st: Any, uploaded_file: Any) -> None:
         return
 
     has_inventory_value_cols = all(col in df.columns for col in REQUIRED_CSV_COLUMNS)
-    has_classification_cols = all(col in df.columns for col in REQUIRED_CLASSIFICATION_COLUMNS)
+    _, missing_cls = _resolve_classification_columns(df)
+    has_classification_cols = len(missing_cls) == 0
 
     if not has_inventory_value_cols and not has_classification_cols:
         missing_val = [c for c in REQUIRED_CSV_COLUMNS if c not in df.columns]
-        missing_cls = [c for c in REQUIRED_CLASSIFICATION_COLUMNS if c not in df.columns]
         st.error(
             "The uploaded CSV does not match either supported schema.\n\n"
             f"- For **Inventory Value Analysis** (`Product`, `Category`, `Units`, `Unit Cost`), missing: **{', '.join(missing_val)}**\n"
-            f"- For **Multicriteria Inventory Classification** (`Item Number`, `Item Name`, `UoM`, `Sales ($)`, `Hits`), missing: **{', '.join(missing_cls)}**"
+            f"- For **Multicriteria Inventory Classification** (`Item Number`, `Item Name`, `Unit of Measure (UoM)`/`UoM`, `Sales ($)`, `POS Hits`/`Hits`), missing: **{', '.join(missing_cls)}**"
         )
         st.info(f"Columns found in uploaded file: {', '.join(str(c) for c in df.columns)}")
         return
@@ -550,31 +568,26 @@ def _render_csv_analysis_section(st: Any, uploaded_file: Any) -> None:
         if not classification["valid"]:
             st.error(classification["error"])
         else:
-            _render_multicriteria_classification_view(st, df, classification)
+            _render_multicriteria_classification_view(st, classification)
 
     if has_inventory_value_cols:
         if has_classification_cols:
             st.divider()
         st.header("Uploaded Inventory CSV Analysis")
         analysis = analyze_inventory_dataframe(df)
-
         if not analysis["valid"]:
             st.error(analysis["error"])
             if analysis["column_names"]:
                 st.info(f"Columns found in uploaded file: {', '.join(str(c) for c in analysis['column_names'])}")
             return
 
-        # 1. Uploaded Data Preview & Metadata
         st.subheader("Uploaded Dataset Overview")
         meta_col1, meta_col2 = st.columns(2)
         meta_col1.metric("Number of Rows", f"{analysis['num_rows']:,}")
         meta_col2.metric("Number of Columns", f"{analysis['num_columns']:,}")
-        st.markdown(
-            "**Column Names:** " + ", ".join(f"`{col}`" for col in analysis["column_names"])
-        )
+        st.markdown("**Column Names:** " + ", ".join(f"`{col}`" for col in analysis["column_names"]))
         st.dataframe(df, use_container_width=True)
 
-        # 2. Summary Metrics
         st.subheader("Inventory Analysis Summary")
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         kpi1.metric("Total Units", f"{analysis['total_units']:,.0f}")
@@ -587,18 +600,14 @@ def _render_csv_analysis_section(st: Any, uploaded_file: Any) -> None:
         )
         kpi4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
 
-        # 3. Total Units by Category
         st.subheader("Total Units by Category")
         st.dataframe(
             analysis["units_by_category"],
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Total Units": st.column_config.NumberColumn("Total Units"),
-            },
+            column_config={"Total Units": st.column_config.NumberColumn("Total Units")},
         )
 
-        # 4. DataFrame Including Inventory Value (formatted as currency)
         st.subheader("Inventory Data with Calculated Inventory Value")
         st.dataframe(
             analysis["analyzed_df"],
@@ -612,7 +621,6 @@ def _render_csv_analysis_section(st: Any, uploaded_file: Any) -> None:
 
 
 def _render_streamlit_response(st: Any, response: AgentResponse) -> None:
-    # Pipeline Progress Banner
     stages = [
         ("1. Question", True),
         ("2. Identify Model", response.identified_model is not None),
@@ -636,7 +644,6 @@ def _render_streamlit_response(st: Any, response: AgentResponse) -> None:
     else:
         st.error(response.explanation)
 
-    # Quantity discount tier breakdown table
     if response.calculation_result and response.identified_model == "quantity_discount":
         st.subheader("Price-Break Tier Comparison")
         st.dataframe(
@@ -644,7 +651,6 @@ def _render_streamlit_response(st: Any, response: AgentResponse) -> None:
             use_container_width=True,
         )
 
-    # Verification details
     if response.verification:
         with st.expander(
             f"Stage 6 — Verification Checks ({response.verification['checks_passed']}/{response.verification['total_checks']} passed)",
@@ -654,7 +660,6 @@ def _render_streamlit_response(st: Any, response: AgentResponse) -> None:
                 status_icon = "✅" if chk["passed"] else "❌"
                 st.write(f"{status_icon} **{chk['check']}**: {chk['detail']}")
 
-    # Full structured pipeline trace
     with st.expander("Full Pipeline Trace (Identify → Extract → Tool → Calculate)"):
         st.json(
             {
@@ -689,76 +694,6 @@ def _print_cli_response(response: AgentResponse) -> None:
     print("=" * 78 + "\n")
 
 
-def _print_cli_csv_analysis(csv_path: str) -> int:
-    try:
-        import pandas as pd
-    except ImportError:
-        print("Error: pandas is required for CSV analysis. Run: .venv\\Scripts\\pip install -r requirements.txt")
-        return 1
-
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as exc:
-        print(f"Error reading CSV '{csv_path}': {exc}")
-        return 1
-
-    has_inventory_value_cols = all(col in df.columns for col in REQUIRED_CSV_COLUMNS)
-    has_classification_cols = all(col in df.columns for col in REQUIRED_CLASSIFICATION_COLUMNS)
-
-    if not has_inventory_value_cols and not has_classification_cols:
-        missing_val = [c for c in REQUIRED_CSV_COLUMNS if c not in df.columns]
-        missing_cls = [c for c in REQUIRED_CLASSIFICATION_COLUMNS if c not in df.columns]
-        print("Validation Error: CSV does not match either supported schema.")
-        print(f"  - Inventory Value Analysis missing: {', '.join(missing_val)}")
-        print(f"  - Multicriteria Classification missing: {', '.join(missing_cls)}")
-        print(f"  - Columns found: {', '.join(str(c) for c in df.columns)}")
-        return 1
-
-    if has_classification_cols:
-        cls_res = classify_inventory_multicriteria(df)
-        if not cls_res["valid"]:
-            print(f"Validation Error: {cls_res['error']}")
-            return 1
-        print("\n" + "=" * 78)
-        print(f"CSV FILE (BAN 517 MULTICRITERIA CLASSIFICATION): {csv_path}")
-        print(f"Items: {cls_res['num_rows']} | Total Sales: ${cls_res['total_sales']:,.2f} | Total Hits: {cls_res['total_hits']:,.0f}")
-        print("-" * 78)
-        print("Summary by Final Class:")
-        print(cls_res["class_summary_df"].to_string(index=False))
-        print("\nFull Classification Table:")
-        print(cls_res["classified_df"].to_string(index=False))
-        print("=" * 78 + "\n")
-
-    if has_inventory_value_cols:
-        analysis = analyze_inventory_dataframe(df)
-        if not analysis["valid"]:
-            print(f"Validation Error: {analysis['error']}")
-            return 1
-
-        print("\n" + "=" * 78)
-        print(f"CSV FILE:                  {csv_path}")
-        print(f"Rows x Columns:            {analysis['num_rows']} x {analysis['num_columns']}")
-        print(f"Column Names:              {', '.join(analysis['column_names'])}")
-        print("-" * 78)
-        print(f"Total Units:               {analysis['total_units']:,.0f}")
-        print(f"Average Unit Cost:         ${analysis['average_unit_cost']:,.2f}")
-        print(
-            f"Product w/ Highest Units:  {analysis['highest_units_product']} "
-            f"({analysis['highest_units_value']:,.0f} units)"
-        )
-        print(f"Total Inventory Value:     ${analysis['total_inventory_value']:,.2f}")
-        print("\nTotal Units by Category:")
-        print(analysis["units_by_category"].to_string(index=False))
-        print("\nInventory Data with Inventory Value:")
-        display_df = analysis["analyzed_df"].copy()
-        display_df["Unit Cost"] = display_df["Unit Cost"].map(lambda x: f"${x:,.2f}")
-        display_df["Inventory Value"] = display_df["Inventory Value"].map(lambda x: f"${x:,.2f}")
-        print(display_df.to_string(index=False))
-        print("=" * 78 + "\n")
-
-    return 0
-
-
 def _run_cli(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -772,17 +707,12 @@ def _run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "question",
         nargs="*",
-        help="Single natural-language inventory question to solve (quoted or unquoted).",
+        help="Single natural-language inventory question to solve.",
     )
     parser.add_argument(
         "--demo",
         action="store_true",
         help="Run built-in demo questions for all 5 supported inventory models.",
-    )
-    parser.add_argument(
-        "--csv",
-        dest="csv_path",
-        help="Analyze an inventory CSV file (requires columns: Product, Category, Units, Unit Cost).",
     )
     parser.add_argument(
         "--llm",
@@ -791,9 +721,6 @@ def _run_cli(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     agent = InventoryDecisionAgent(use_llm=args.llm)
-
-    if args.csv_path:
-        return _print_cli_csv_analysis(args.csv_path)
 
     if args.demo:
         for title, q in SAMPLE_QUESTIONS.items():
@@ -805,7 +732,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
         _print_cli_response(agent.answer(" ".join(args.question)))
         return 0
 
-    print("Supply Chain Analytics Inventory Decision Agent (Interactive Command Prompt CLI)")
+    print("Supply Chain Analytics Inventory Decision Agent (Interactive CLI)")
     print("Type an inventory question, 'demo' to run all 5 models, or 'quit' to exit.\n")
     while True:
         try:
