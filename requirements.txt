@@ -1,0 +1,8 @@
+# Core numerical tools and deterministic agent use only Python's standard library.
+# UI, CSV analysis & testing dependencies:
+streamlit>=1.38.0
+pandas>=2.0.0
+pytest>=8.0.0
+
+# Optional: enables LLM-assisted natural-language input extraction when OPENAI_API_KEY is set
+# openai>=1.40.0
